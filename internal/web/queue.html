@@ -51,6 +51,9 @@ td.repo a:hover { color: var(--accent); }
 td.age { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 td.author { white-space: nowrap; }
 .title { font-weight: 500; }
+/* Part of the title link, not a second one, so it just steps back rather than
+   asking to be clicked on its own. */
+.title .num { font-weight: 400; color: var(--muted); }
 .empty { padding: 3rem 0; text-align: center; color: var(--muted); }
 footer { margin-top: 2rem; color: var(--muted); font-size: .8rem; }
 
@@ -147,8 +150,7 @@ td .label { margin-left: .35rem; vertical-align: 1px; }
         <td class="pos">{{add $i 1}}</td>
         <td class="repo"><a href="{{$pr.RepoURL}}">{{$pr.Repo}}</a></td>
         <td>
-          <a class="title" href="{{$pr.URL}}">{{$pr.Title}}</a>
-          <a href="{{$pr.URL}}">#{{$pr.Number}}</a>
+          <a class="title" href="{{$pr.URL}}"><span class="num">#{{$pr.Number}}</span> {{$pr.Title}}</a>
           {{range $pr.Labels}}<a class="label" style="background:#{{.BG}};color:#{{.FG}}" href="{{.URL}}">{{.Name}}</a>{{end}}
         </td>
         <td class="author">{{$pr.Author}}</td>

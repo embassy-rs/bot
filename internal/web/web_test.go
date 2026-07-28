@@ -92,7 +92,9 @@ func TestRendersRepoFilter(t *testing.T) {
 		Queue: []queuePR{{
 			Repo:    "xarxa",
 			RepoURL: f.toggleRepo("xarxa"),
+			Number:  6,
 			Title:   "Add a thing",
+			URL:     "https://github.com/embassy-rs/xarxa/pull/6",
 		}},
 	}
 
@@ -108,13 +110,20 @@ func TestRendersRepoFilter(t *testing.T) {
 		`class="chip off" href="/?repo=embassy&amp;repo=xarxa"`, // unselected: adds itself
 		`class="chip" href="/"`,                                 // selected: clears itself
 		`<td class="repo"><a href="/">xarxa</a></td>`,           // the row toggles it off again
+
+		// Number and title are one link, number first.
+		`<a class="title" href="https://github.com/embassy-rs/xarxa/pull/6"><span class="num">#6</span> Add a thing</a>`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("missing %s in rendered page", want)
 		}
 	}
-	if strings.Contains(html, "embassy-rs/") {
+	// The owner prefix is never shown, and the PR link is never repeated.
+	if strings.Contains(html, "embassy-rs/xarxa\">") || strings.Contains(html, ">embassy-rs/") {
 		t.Error("owner prefix leaked into the page")
+	}
+	if n := strings.Count(html, `href="https://github.com/embassy-rs/xarxa/pull/6"`); n != 1 {
+		t.Errorf("PR linked %d times, want 1", n)
 	}
 }
 
