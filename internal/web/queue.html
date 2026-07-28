@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embassy review queue</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fff;
+  --fg: #1a1a1a;
+  --muted: #6a6a6a;
+  --line: #e2e2e2;
+  --accent: #b7410e;
+  --row: #fafafa;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16161a;
+    --fg: #e8e8e8;
+    --muted: #9a9a9a;
+    --line: #2c2c32;
+    --accent: #ff8a5c;
+    --row: #1c1c21;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 2rem 1rem 4rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+main { max-width: 60rem; margin: 0 auto; }
+h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+.sub { color: var(--muted); margin: 0 0 2rem; font-size: .9rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 40rem; }
+th, td { text-align: left; padding: .6rem .75rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }
+tbody tr:nth-child(even) { background: var(--row); }
+td.pos { color: var(--muted); font-variant-numeric: tabular-nums; width: 2.5rem; }
+td.repo { color: var(--muted); white-space: nowrap; }
+td.age { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+td.author { white-space: nowrap; }
+.title { font-weight: 500; }
+.empty { padding: 3rem 0; text-align: center; color: var(--muted); }
+footer { margin-top: 2rem; color: var(--muted); font-size: .8rem; }
+
+.label {
+  display: inline-block;
+  padding: 0 .6em;
+  border-radius: 2em;
+  font-size: .75rem;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.label:hover { text-decoration: none; box-shadow: 0 0 0 2px var(--line); }
+td .label { margin-left: .35rem; vertical-align: 1px; }
+
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin-bottom: 1.25rem; }
+.filters .caption { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-right: .2rem; }
+.filters .label.off { opacity: .45; }
+.filters .label.off:hover { opacity: 1; }
+.filters .clear { color: var(--muted); font-size: .75rem; margin-left: .3rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Review queue</h1>
+  <p class="sub">
+    Open pull requests that are marked ready for review and have green CI,
+    oldest first. Ordered by when each one first became reviewable — a PR that
+    drops out and comes back keeps its place.
+  </p>
+
+  {{if .Labels}}
+  <div class="filters">
+    <span class="caption">Labels</span>
+    {{range .Labels}}
+    <a class="label{{if not .On}} off{{end}}" style="background:#{{.BG}};color:#{{.FG}}" href="{{.URL}}">{{.Name}}</a>
+    {{end}}
+    {{if .Filtered}}<a class="clear" href="/">clear</a>{{end}}
+  </div>
+  {{end}}
+
+  {{if .Queue}}
+  <div class="scroll">
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Repo</th>
+        <th>Pull request</th>
+        <th>Author</th>
+        <th>Waiting</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range $i, $pr := .Queue}}
+      <tr>
+        <td class="pos">{{add $i 1}}</td>
+        <td class="repo">{{$pr.Repo}}</td>
+        <td>
+          <a class="title" href="{{$pr.URL}}">{{$pr.Title}}</a>
+          <a href="{{$pr.URL}}">#{{$pr.Number}}</a>
+          {{range $pr.Labels}}<a class="label" style="background:#{{.BG}};color:#{{.FG}}" href="{{.URL}}">{{.Name}}</a>{{end}}
+        </td>
+        <td class="author">{{$pr.Author}}</td>
+        <td class="age" title="{{$pr.Since}}">{{$pr.Age}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else if .Filtered}}
+  <p class="empty">Nothing in the queue with those labels. <a href="/">Show everything</a>.</p>
+  {{else}}
+  <p class="empty">Nothing in the queue. 🎉</p>
+  {{end}}
+
+  <footer>{{len .Queue}} pull request{{if ne (len .Queue) 1}}s{{end}} · generated {{.Now}}</footer>
+</main>
+</body>
+</html>
