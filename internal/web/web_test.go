@@ -11,16 +11,17 @@ import (
 // Label chips are colored through a style attribute, which html/template is
 // entitled to replace wholesale with ZgotmplZ if it doesn't like what's in it.
 func TestRendersLabelColors(t *testing.T) {
+	f := filter{labels: []string{"bug"}}
 	data := queueData{
 		Filtered: true,
 		Labels: []label{
-			newLabel("bug", "d73a4a", []string{"bug"}),
-			newLabel("enhancement", "a2eeef", []string{"bug"}),
+			newLabel("bug", "d73a4a", f),
+			newLabel("enhancement", "a2eeef", f),
 		},
 		Queue: []queuePR{{
-			Repo:   "embassy-rs/embassy",
+			Repo:   "embassy",
 			Title:  "Fix it",
-			Labels: []label{newLabel("bug", "d73a4a", []string{"bug"})},
+			Labels: []label{newLabel("bug", "d73a4a", f)},
 		}},
 	}
 
@@ -47,22 +48,73 @@ func TestRendersLabelColors(t *testing.T) {
 	}
 }
 
-func TestToggleURL(t *testing.T) {
+// Flipping a chip must leave the other dimension of the filter untouched, so
+// picking a repo can't silently drop the labels you'd already picked.
+func TestToggle(t *testing.T) {
+	both := filter{repos: []string{"xarxa"}, labels: []string{"bug"}}
+
 	tests := []struct {
-		selected []string
-		name     string
-		want     string
+		name string
+		got  string
+		want string
 	}{
-		{nil, "bug", "/?label=bug"},
-		{[]string{"bug"}, "bug", "/"},
-		{[]string{"bug"}, "ci", "/?label=bug&label=ci"},
-		{[]string{"bug", "ci"}, "bug", "/?label=ci"},
+		{"add the first label", filter{}.toggleLabel("bug"), "/?label=bug"},
+		{"remove the only label", filter{labels: []string{"bug"}}.toggleLabel("bug"), "/"},
+		{"add a second label", filter{labels: []string{"bug"}}.toggleLabel("ci"), "/?label=bug&label=ci"},
+		{"remove one of two labels", filter{labels: []string{"bug", "ci"}}.toggleLabel("bug"), "/?label=ci"},
+
+		{"add the first repo", filter{}.toggleRepo("xarxa"), "/?repo=xarxa"},
+		{"remove the only repo", filter{repos: []string{"xarxa"}}.toggleRepo("xarxa"), "/"},
+		{"add a second repo", filter{repos: []string{"embassy"}}.toggleRepo("xarxa"), "/?repo=embassy&repo=xarxa"},
+
+		// The other dimension survives in both directions.
+		{"label toggle keeps repos", both.toggleLabel("ci"), "/?label=bug&label=ci&repo=xarxa"},
+		{"repo toggle keeps labels", both.toggleRepo("embassy"), "/?label=bug&repo=embassy&repo=xarxa"},
+		{"clearing labels keeps repos", both.toggleLabel("bug"), "/?repo=xarxa"},
+		{"clearing repos keeps labels", both.toggleRepo("xarxa"), "/?label=bug"},
 	}
 	for _, test := range tests {
-		got := toggleURL(test.selected, test.name)
-		if got != test.want {
-			t.Errorf("toggleURL(%v, %q) = %q, want %q", test.selected, test.name, got, test.want)
+		t.Run(test.name, func(t *testing.T) {
+			if test.got != test.want {
+				t.Errorf("got %q, want %q", test.got, test.want)
+			}
+		})
+	}
+}
+
+// Both filter bars render, and a repo chip is a plain chip rather than a label
+// wearing a color it doesn't have.
+func TestRendersRepoFilter(t *testing.T) {
+	f := filter{repos: []string{"xarxa"}}
+	data := queueData{
+		Filtered: true,
+		Repos:    []repoChip{newRepoChip("embassy", f), newRepoChip("xarxa", f)},
+		Queue: []queuePR{{
+			Repo:    "xarxa",
+			RepoURL: f.toggleRepo("xarxa"),
+			Title:   "Add a thing",
+		}},
+	}
+
+	var out strings.Builder
+	err := queueTemplate.Execute(&out, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := out.String()
+
+	for _, want := range []string{
+		`<span class="caption">Repos</span>`,
+		`class="chip off" href="/?repo=embassy&amp;repo=xarxa"`, // unselected: adds itself
+		`class="chip" href="/"`,                                 // selected: clears itself
+		`<td class="repo"><a href="/">xarxa</a></td>`,           // the row toggles it off again
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("missing %s in rendered page", want)
 		}
+	}
+	if strings.Contains(html, "embassy-rs/") {
+		t.Error("owner prefix leaked into the page")
 	}
 }
 
@@ -84,11 +136,20 @@ func TestHexColor(t *testing.T) {
 	}
 }
 
-func TestSelectedLabelsDedupes(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/?label=bug&label=&label=bug&label=ci", nil)
-	got := selectedLabels(r)
-	want := []string{"bug", "ci"}
-	if !slices.Equal(got, want) {
-		t.Errorf("selectedLabels = %v, want %v", got, want)
+func TestNewFilterDedupes(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/?label=bug&label=&label=bug&label=ci&repo=xarxa&repo=xarxa", nil)
+	f := newFilter(r)
+
+	if want := []string{"bug", "ci"}; !slices.Equal(f.labels, want) {
+		t.Errorf("labels = %v, want %v", f.labels, want)
+	}
+	if want := []string{"xarxa"}; !slices.Equal(f.repos, want) {
+		t.Errorf("repos = %v, want %v", f.repos, want)
+	}
+	if !f.on() {
+		t.Error("want the filter reported as on")
+	}
+	if newFilter(httptest.NewRequest(http.MethodGet, "/", nil)).on() {
+		t.Error("want a bare / reported as unfiltered")
 	}
 }

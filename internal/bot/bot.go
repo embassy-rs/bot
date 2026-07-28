@@ -267,12 +267,20 @@ func (b *Bot) reconcile(ctx context.Context, pr *models.PullRequest) error {
 }
 
 // Queue returns the review queue: every reviewable PR, oldest-qualifying first.
-// Given labels, only the PRs carrying at least one of them.
-func Queue(ctx context.Context, labels []string) (models.PullRequestSlice, error) {
+//
+// Given repos and/or labels, only the PRs matching them. Values within one of
+// those are ORed -- any of these repos, carrying any of these labels -- and a
+// PR has to match both to survive, so the two narrow the queue together.
+func Queue(ctx context.Context, repos, labels []string) (models.PullRequestSlice, error) {
 	mods := []qm.QueryMod{
 		qm.Where("is_reviewable = true"),
 		qm.OrderBy("first_reviewable_at asc"),
 		qm.Load("repo"),
+	}
+	if len(repos) != 0 {
+		// Matched on the bare name rather than owner/name: everything the bot
+		// watches lives under the one org, and that's what the page shows.
+		mods = append(mods, qm.Where("repo_id in (select id from repo where name = any(?::text[]))", pgtypes.StringArray(repos)))
 	}
 	if len(labels) != 0 {
 		// && is "the arrays overlap", i.e. the labels are ORed. The cast is
@@ -283,31 +291,43 @@ func Queue(ctx context.Context, labels []string) (models.PullRequestSlice, error
 	return models.PullRequests(mods...).All(ctx)
 }
 
+// QueueRepos returns every repo with something on the queue, alphabetically.
+func QueueRepos(ctx context.Context) ([]string, error) {
+	return queryStrings(ctx, "select distinct r.name from pull_request pr join repo r on r.id = pr.repo_id where pr.is_reviewable order by r.name")
+}
+
 // QueueLabels returns every label present on the queue, alphabetically.
-//
-// Deliberately unfiltered: this is the set of filters the page offers, so
-// picking one label mustn't make all the others unreachable.
 func QueueLabels(ctx context.Context) ([]string, error) {
-	rows, err := bunny.Query(ctx, "select distinct unnest(labels) as label from pull_request where is_reviewable order by label")
+	return queryStrings(ctx, "select distinct unnest(labels) as label from pull_request where is_reviewable order by label")
+}
+
+// queryStrings runs a query returning one text column.
+//
+// The two callers are deliberately unfiltered: between them they're the set of
+// filters the page offers, and the values within each are ORed, so listing only
+// the ones still on show would make every other one unreachable the moment one
+// was picked.
+func queryStrings(ctx context.Context, query string) ([]string, error) {
+	rows, err := bunny.Query(ctx, query)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	defer rows.Close()
 
-	var labels []string
+	var values []string
 	for rows.Next() {
-		var label string
-		err := rows.Scan(&label)
+		var value string
+		err := rows.Scan(&value)
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
-		labels = append(labels, label)
+		values = append(values, value)
 	}
 	err = rows.Err()
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	return labels, nil
+	return values, nil
 }
 
 // LabelColors returns every label we know of, so the queue page can paint them

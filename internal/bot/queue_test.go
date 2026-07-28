@@ -65,11 +65,45 @@ func TestQueueLabelFilter(t *testing.T) {
 		{"a label nobody has", []string{"nonexistent"}, nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got := queueNumbers(t, ctx, repo.ID, test.labels)
+			got := queueNumbers(t, ctx, repo.ID, nil, test.labels)
 			if !slices.Equal(got, test.want) {
 				t.Errorf("filter %v: got PRs %v, want %v", test.labels, got, test.want)
 			}
 		})
+	}
+
+	// Repos filter the same way, and the two dimensions narrow together rather
+	// than widening each other.
+	for _, test := range []struct {
+		name   string
+		repos  []string
+		labels []string
+		want   []int64
+	}{
+		{"this repo", []string{repo.Name}, nil, []int64{1, 2, 3}},
+		{"a repo nobody has", []string{"nonexistent"}, nil, nil},
+		{"two repos are ORed", []string{repo.Name, "nonexistent"}, nil, []int64{1, 2, 3}},
+		{"repo and label are ANDed", []string{repo.Name}, []string{"embassy-nrf"}, []int64{1}},
+		{"the wrong repo wins over a matching label", []string{"nonexistent"}, []string{"embassy-nrf"}, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := queueNumbers(t, ctx, repo.ID, test.repos, test.labels)
+			if !slices.Equal(got, test.want) {
+				t.Errorf("repos %v labels %v: got PRs %v, want %v", test.repos, test.labels, got, test.want)
+			}
+		})
+	}
+
+	// The filter bar's other half: every repo with something on the queue.
+	repos, err := QueueRepos(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(repos, repo.Name) {
+		t.Errorf("QueueRepos: missing %q, got %v", repo.Name, repos)
+	}
+	if !slices.IsSorted(repos) {
+		t.Errorf("QueueRepos: not sorted: %v", repos)
 	}
 
 	// The filter bar's offering: every label on the queue, deduplicated.
@@ -89,10 +123,10 @@ func TestQueueLabelFilter(t *testing.T) {
 
 // queueNumbers runs the queue query and keeps only this test's repo: the dev
 // database it runs against holds whatever else has been synced into it.
-func queueNumbers(t *testing.T, ctx context.Context, repoID int64, labels []string) []int64 {
+func queueNumbers(t *testing.T, ctx context.Context, repoID int64, repos, labels []string) []int64 {
 	t.Helper()
 
-	prs, err := Queue(ctx, labels)
+	prs, err := Queue(ctx, repos, labels)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -37,19 +37,30 @@ type label struct {
 	FG   template.CSS
 }
 
+// repoChip is one repo in the filter bar, and the same toggle on a queue row.
+// Repos have no color of their own the way labels do, so they're drawn in the
+// page's palette rather than GitHub's.
+type repoChip struct {
+	Name string
+	On   bool
+	URL  string
+}
+
 type queuePR struct {
-	Repo   string
-	Number int64
-	Title  string
-	Author string
-	URL    string
-	Age    string
-	Since  string
-	Labels []label
+	Repo    string
+	RepoURL string
+	Number  int64
+	Title   string
+	Author  string
+	URL     string
+	Age     string
+	Since   string
+	Labels  []label
 }
 
 type queueData struct {
 	Queue    []queuePR
+	Repos    []repoChip
 	Labels   []label
 	Filtered bool
 	Now      string
@@ -58,18 +69,23 @@ type queueData struct {
 func QueueHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	selected := selectedLabels(r)
+	f := newFilter(r)
 
-	prs, err := bot.Queue(ctx, selected)
+	prs, err := bot.Queue(ctx, f.repos, f.labels)
 	if err != nil {
 		log.Error(ctx, errors.StackTrace(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	// The filter bar offers every label on the *unfiltered* queue: the labels
-	// are ORed, so listing only the ones on show would make every other label
-	// unreachable the moment one is picked.
+	// Both bars offer what's on the *unfiltered* queue. See queryStrings.
+	allRepos, err := bot.QueueRepos(ctx)
+	if err != nil {
+		log.Error(ctx, errors.StackTrace(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
 	allLabels, err := bot.QueueLabels(ctx)
 	if err != nil {
 		log.Error(ctx, errors.StackTrace(err))
@@ -87,26 +103,32 @@ func QueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	data := queueData{
-		Filtered: len(selected) != 0,
+		Filtered: f.on(),
 		Now:      now.UTC().Format("2006-01-02 15:04:05 MST"),
+	}
+	for _, name := range allRepos {
+		data.Repos = append(data.Repos, newRepoChip(name, f))
 	}
 	for _, name := range allLabels {
 		// The bar spans repos, so there's no one repo to take the color from.
-		data.Labels = append(data.Labels, newLabel(name, colors.anyColor(name), selected))
+		data.Labels = append(data.Labels, newLabel(name, colors.anyColor(name), f))
 	}
 	for _, pr := range prs {
-		repo := pr.R.Repo()
+		// Bare name, no owner: everything the bot watches is under the one org,
+		// so the prefix would be the same on every row and tell nobody anything.
+		name := pr.R.Repo().Name
 		row := queuePR{
-			Repo:   repo.Owner + "/" + repo.Name,
-			Number: pr.Number,
-			Title:  pr.Title,
-			Author: pr.Author,
-			URL:    pr.HTMLURL,
-			Age:    humanizeAge(now.Sub(pr.FirstReviewableAt.Time)),
-			Since:  pr.FirstReviewableAt.Time.UTC().Format(time.RFC3339),
+			Repo:    name,
+			RepoURL: f.toggleRepo(name),
+			Number:  pr.Number,
+			Title:   pr.Title,
+			Author:  pr.Author,
+			URL:     pr.HTMLURL,
+			Age:     humanizeAge(now.Sub(pr.FirstReviewableAt.Time)),
+			Since:   pr.FirstReviewableAt.Time.UTC().Format(time.RFC3339),
 		}
 		for _, name := range pr.Labels {
-			row.Labels = append(row.Labels, newLabel(name, colors.color(pr.RepoID, name), selected))
+			row.Labels = append(row.Labels, newLabel(name, colors.color(pr.RepoID, name), f))
 		}
 		data.Queue = append(data.Queue, row)
 	}
@@ -119,45 +141,99 @@ func QueueHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// selectedLabels reads the filter out of `?label=a&label=b`, dropping blanks
-// and repeats so they can't show up twice in the toggle links built from it.
-func selectedLabels(r *http.Request) []string {
-	var labels []string
-	for _, l := range r.URL.Query()["label"] {
-		if l == "" || slices.Contains(labels, l) {
+// filter is what the page is narrowed to, read out of
+// `?repo=a&repo=b&label=c`. The two dimensions are independent, so flipping one
+// chip has to leave the other dimension exactly as it was.
+type filter struct {
+	repos  []string
+	labels []string
+}
+
+func newFilter(r *http.Request) filter {
+	return filter{
+		repos:  queryValues(r, "repo"),
+		labels: queryValues(r, "label"),
+	}
+}
+
+// queryValues reads a repeated query parameter, dropping blanks and repeats so
+// they can't show up twice in the toggle links built from it.
+func queryValues(r *http.Request, key string) []string {
+	var values []string
+	for _, v := range r.URL.Query()[key] {
+		if v == "" || slices.Contains(values, v) {
 			continue
 		}
-		labels = append(labels, l)
+		values = append(values, v)
 	}
-	return labels
+	return values
 }
 
-func newLabel(name, color string, selected []string) label {
-	color = hexColor(color)
-	return label{
-		Name: name,
-		On:   slices.Contains(selected, name),
-		URL:  toggleURL(selected, name),
-		BG:   template.CSS(color),
-		FG:   template.CSS(textColor(color)),
-	}
+func (f filter) on() bool {
+	return len(f.repos) != 0 || len(f.labels) != 0
 }
 
-// toggleURL is the queue with name flipped in or out of the filter.
-func toggleURL(selected []string, name string) string {
-	q := url.Values{}
-	for _, l := range selected {
-		if l != name {
-			q.Add("label", l)
+// toggleRepo and toggleLabel are the queue with name flipped in or out of that
+// one dimension, the other left alone.
+func (f filter) toggleRepo(name string) string {
+	return filterURL(toggle(f.repos, name), f.labels)
+}
+
+func (f filter) toggleLabel(name string) string {
+	return filterURL(f.repos, toggle(f.labels, name))
+}
+
+// toggle flips name in or out of a selection.
+//
+// Sorted, so the same set of chips is always the same URL however you got
+// there: the values are ORed, so click order carries no meaning and letting it
+// into the link would just mint a second URL for a filter that already has one.
+func toggle(selected []string, name string) []string {
+	var out []string
+	for _, s := range selected {
+		if s != name {
+			out = append(out, s)
 		}
 	}
 	if !slices.Contains(selected, name) {
-		q.Add("label", name)
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// filterURL is the queue page under a given selection.
+func filterURL(repos, labels []string) string {
+	q := url.Values{}
+	for _, r := range repos {
+		q.Add("repo", r)
+	}
+	for _, l := range labels {
+		q.Add("label", l)
 	}
 	if len(q) == 0 {
 		return "/"
 	}
 	return "/?" + q.Encode()
+}
+
+func newRepoChip(name string, f filter) repoChip {
+	return repoChip{
+		Name: name,
+		On:   slices.Contains(f.repos, name),
+		URL:  f.toggleRepo(name),
+	}
+}
+
+func newLabel(name, color string, f filter) label {
+	color = hexColor(color)
+	return label{
+		Name: name,
+		On:   slices.Contains(f.labels, name),
+		URL:  f.toggleLabel(name),
+		BG:   template.CSS(color),
+		FG:   template.CSS(textColor(color)),
+	}
 }
 
 // colors answers "what color does GitHub paint this label". Colors belong to a

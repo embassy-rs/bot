@@ -44,6 +44,10 @@ th { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color:
 tbody tr:nth-child(even) { background: var(--row); }
 td.pos { color: var(--muted); font-variant-numeric: tabular-nums; width: 2.5rem; }
 td.repo { color: var(--muted); white-space: nowrap; }
+/* The repo on a row is a filter toggle too, but there's one on every row, so it
+   stays quiet until you go near it. */
+td.repo a { color: inherit; }
+td.repo a:hover { color: var(--accent); }
 td.age { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 td.author { white-space: nowrap; }
 .title { font-weight: 500; }
@@ -63,11 +67,33 @@ footer { margin-top: 2rem; color: var(--muted); font-size: .8rem; }
 .label:hover { text-decoration: none; box-shadow: 0 0 0 2px var(--line); }
 td .label { margin-left: .35rem; vertical-align: 1px; }
 
-.filters { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin-bottom: 1.25rem; }
-.filters .caption { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-right: .2rem; }
+/* A repo chip. Shaped like a label chip, but a repo has no color of its own to
+   borrow, so selected is drawn in the page's accent rather than GitHub's. */
+.chip {
+  display: inline-block;
+  padding: 0 .6em;
+  border-radius: 2em;
+  font-size: .75rem;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+  text-decoration: none;
+  background: var(--accent);
+  color: var(--bg);
+}
+.chip:hover { text-decoration: none; box-shadow: 0 0 0 2px var(--line); }
+
+.filterbar { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.25rem; }
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+/* Fixed width so the two rows' chips line up under each other. */
+.filters .caption { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-right: .2rem; min-width: 3.5rem; }
+/* Unselected. A label keeps its own color and just fades, since that color is
+   how you recognize it; a repo has nothing to fade, so it goes quiet instead. */
 .filters .label.off { opacity: .45; }
 .filters .label.off:hover { opacity: 1; }
-.filters .clear { color: var(--muted); font-size: .75rem; margin-left: .3rem; }
+.filters .chip.off { background: var(--line); color: var(--muted); }
+.filters .chip.off:hover { color: var(--fg); }
+.filters .clear { color: var(--muted); font-size: .75rem; }
 </style>
 </head>
 <body>
@@ -79,13 +105,27 @@ td .label { margin-left: .35rem; vertical-align: 1px; }
     drops out and comes back keeps its place.
   </p>
 
-  {{if .Labels}}
-  <div class="filters">
-    <span class="caption">Labels</span>
-    {{range .Labels}}
-    <a class="label{{if not .On}} off{{end}}" style="background:#{{.BG}};color:#{{.FG}}" href="{{.URL}}">{{.Name}}</a>
+  {{if or .Repos .Labels}}
+  <div class="filterbar">
+    {{if .Repos}}
+    <div class="filters">
+      <span class="caption">Repos</span>
+      {{range .Repos}}
+      <a class="chip{{if not .On}} off{{end}}" href="{{.URL}}">{{.Name}}</a>
+      {{end}}
+    </div>
     {{end}}
-    {{if .Filtered}}<a class="clear" href="/">clear</a>{{end}}
+    {{if .Labels}}
+    <div class="filters">
+      <span class="caption">Labels</span>
+      {{range .Labels}}
+      <a class="label{{if not .On}} off{{end}}" style="background:#{{.BG}};color:#{{.FG}}" href="{{.URL}}">{{.Name}}</a>
+      {{end}}
+    </div>
+    {{end}}
+    {{if .Filtered}}
+    <div class="filters"><span class="caption"></span><a class="clear" href="/">clear filters</a></div>
+    {{end}}
   </div>
   {{end}}
 
@@ -105,7 +145,7 @@ td .label { margin-left: .35rem; vertical-align: 1px; }
       {{range $i, $pr := .Queue}}
       <tr>
         <td class="pos">{{add $i 1}}</td>
-        <td class="repo">{{$pr.Repo}}</td>
+        <td class="repo"><a href="{{$pr.RepoURL}}">{{$pr.Repo}}</a></td>
         <td>
           <a class="title" href="{{$pr.URL}}">{{$pr.Title}}</a>
           <a href="{{$pr.URL}}">#{{$pr.Number}}</a>
@@ -119,7 +159,7 @@ td .label { margin-left: .35rem; vertical-align: 1px; }
   </table>
   </div>
   {{else if .Filtered}}
-  <p class="empty">Nothing in the queue with those labels. <a href="/">Show everything</a>.</p>
+  <p class="empty">Nothing in the queue matching that filter. <a href="/">Show everything</a>.</p>
   {{else}}
   <p class="empty">Nothing in the queue. 🎉</p>
   {{end}}
