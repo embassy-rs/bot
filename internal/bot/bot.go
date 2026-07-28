@@ -72,10 +72,14 @@ func (b *Bot) client(repo *models.Repo) (*gh.Client, error) {
 	return b.app.Client(repo.InstallationID)
 }
 
-// fetchCIState reads the combined state of the old-style commit statuses on a
-// sha. Deliberately not check runs: embassy's CI reports via the statuses API.
-// A commit with no statuses at all comes back as "pending", which is the
-// behaviour we want -- not green, so not queued.
+// fetchCIState reads a sha's CI state from both of the places GitHub keeps it:
+// old-style commit statuses (what embassy's CI posts) and check runs (what
+// GitHub Actions posts, as on xarxa). A repo usually uses one or the other, and
+// looking at only one of them makes every PR on the other kind of repo look
+// like it never finishes.
+//
+// A commit with no CI at all reads as pending: not green, so not queued, but
+// nothing to complain about either.
 func (b *Bot) fetchCIState(ctx context.Context, repo *models.Repo, sha string) (models.CiState, error) {
 	if sha == "" {
 		return models.CiStates.Unknown, nil
@@ -86,21 +90,115 @@ func (b *Bot) fetchCIState(ctx context.Context, repo *models.Repo, sha string) (
 		return models.CiStates.Unknown, err
 	}
 
+	var states []models.CiState
+
+	// The combined state is already the rollup of every status context, so
+	// there's nothing to page through. Its state is "pending" when there are no
+	// statuses at all, hence the count check: "this repo doesn't post statuses"
+	// mustn't read as "the statuses haven't finished".
 	status, _, err := client.Repositories.GetCombinedStatus(ctx, repo.Owner, repo.Name, sha, &gh.ListOptions{PerPage: 1})
 	if err != nil {
 		return models.CiStates.Unknown, errors.WithStack(err)
 	}
-
-	switch status.GetState() {
-	case "success":
-		return models.CiStates.Success, nil
-	case "pending":
-		return models.CiStates.Pending, nil
-	case "failure", "error":
-		return models.CiStates.Failure, nil
-	default:
-		return models.CiStates.Unknown, nil
+	if status.GetTotalCount() != 0 {
+		states = append(states, statusState(status.GetState()))
 	}
+
+	runs, err := b.fetchCheckRuns(ctx, client, repo, sha)
+	if err != nil {
+		// Reading check runs needs the Checks:read permission, which an
+		// installation has to accept. Don't let a repo that hasn't lose us the
+		// statuses we did read -- on a statuses repo they're the whole answer.
+		log.Errorf(ctx, "check runs read failed", log.Fields{
+			"repo": repo.Owner + "/" + repo.Name,
+			"err":  errors.StackTrace(err),
+		})
+	}
+	states = append(states, runs...)
+
+	return mergeCIStates(states), nil
+}
+
+// fetchCheckRuns reads the state of each check run on a sha.
+func (b *Bot) fetchCheckRuns(ctx context.Context, client *gh.Client, repo *models.Repo, sha string) ([]models.CiState, error) {
+	// "latest" is the default, spelled out because it matters: one run per
+	// name, so a re-run doesn't get counted alongside the attempt it replaced.
+	opts := &gh.ListCheckRunsOptions{
+		Filter:      gh.Ptr("latest"),
+		ListOptions: gh.ListOptions{PerPage: 100},
+	}
+
+	var states []models.CiState
+	for {
+		res, resp, err := client.Checks.ListCheckRunsForRef(ctx, repo.Owner, repo.Name, sha, opts)
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+		for _, run := range res.CheckRuns {
+			states = append(states, checkRunState(run))
+		}
+		if resp.NextPage == 0 {
+			return states, nil
+		}
+		opts.Page = resp.NextPage
+	}
+}
+
+// statusState maps the rollup of the commit statuses.
+func statusState(state string) models.CiState {
+	switch state {
+	case "success":
+		return models.CiStates.Success
+	case "pending":
+		return models.CiStates.Pending
+	case "failure", "error":
+		return models.CiStates.Failure
+	default:
+		return models.CiStates.Unknown
+	}
+}
+
+// checkRunState maps one check run. The conclusions that don't mean "this went
+// wrong" -- a skipped job, a neutral report -- count as green, the way GitHub
+// itself counts them when deciding whether required checks passed.
+func checkRunState(run *gh.CheckRun) models.CiState {
+	if run.GetStatus() != "completed" {
+		return models.CiStates.Pending
+	}
+	switch run.GetConclusion() {
+	case "success", "neutral", "skipped":
+		return models.CiStates.Success
+	case "failure", "timed_out", "action_required", "cancelled", "stale", "startup_failure":
+		return models.CiStates.Failure
+	default:
+		return models.CiStates.Unknown
+	}
+}
+
+// mergeCIStates rolls the signals into one: anything failed makes the whole
+// thing failed, anything unfinished or unrecognized makes it pending, and green
+// means every signal we could see was green.
+//
+// Failure wins over pending on purpose. One job failing twenty minutes into a
+// two-hour build is CI having gone red, whatever the other jobs are still
+// doing, and that's when the grace period should start running.
+func mergeCIStates(states []models.CiState) models.CiState {
+	// No signals at all: CI that hasn't reported yet is indistinguishable from
+	// a repo that has none, and neither belongs in the queue.
+	if len(states) == 0 {
+		return models.CiStates.Pending
+	}
+
+	result := models.CiStates.Success
+	for _, state := range states {
+		switch state {
+		case models.CiStates.Failure:
+			return models.CiStates.Failure
+		case models.CiStates.Pending, models.CiStates.Unknown:
+			result = models.CiStates.Pending
+		}
+	}
+	return result
 }
 
 // reviewable is the single definition of "belongs in the review queue": open,

@@ -62,9 +62,10 @@ func main() {
 			1: "closed",
 		}),
 
-		// Combined state of the *old style* commit statuses on the head commit
-		// (the `status` API, not check runs). A commit with no statuses at all
-		// reads back as "pending", which is what we want: not green, not queued.
+		// State of CI on the head commit, rolled up from both of the ways GitHub
+		// reports it: old-style commit statuses and check runs. A commit with no
+		// CI at all reads back as "pending", which is what we want: not green,
+		// not queued. See fetchCIState in internal/bot/bot.go.
 		Type("ci_state", Enum{
 			0: "unknown",
 			1: "pending",

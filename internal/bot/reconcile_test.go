@@ -8,6 +8,7 @@ import (
 
 	"embassy.dev/bot/internal/models"
 	"embassy.dev/bot/toolkit/db"
+	gh "github.com/google/go-github/v88/github"
 	"github.com/sqlbunny/sqlbunny/runtime/qm"
 	"github.com/sqlbunny/sqlbunny/types/null"
 )
@@ -113,6 +114,83 @@ func TestKeepsQueuePositionAfterDropout(t *testing.T) {
 	drift := pr.FirstReviewableAt.Time.Sub(position.Time).Abs()
 	if drift > time.Millisecond {
 		t.Fatalf("lost queue position in db: was %v, now %v", position.Time, pr.FirstReviewableAt.Time)
+	}
+}
+
+// CI state is rolled up from both commit statuses and check runs, so a repo
+// that reports through either one is read correctly.
+func TestMergeCIStates(t *testing.T) {
+	var (
+		unknown = models.CiStates.Unknown
+		pending = models.CiStates.Pending
+		success = models.CiStates.Success
+		failure = models.CiStates.Failure
+	)
+
+	for _, test := range []struct {
+		name   string
+		states []models.CiState
+		want   models.CiState
+	}{
+		// A repo with no CI at all, and a commit whose CI hasn't reported yet,
+		// look the same from here. Neither is green.
+		{"nothing at all", nil, pending},
+
+		{"statuses only, green", []models.CiState{success}, success},
+		{"check runs only, green", []models.CiState{success, success, success}, success},
+		{"both kinds, all green", []models.CiState{success, success}, success},
+
+		// Failure wins over everything: one job going red is CI going red, even
+		// with the rest of the build still to come.
+		{"one job failed, others running", []models.CiState{failure, pending, pending}, failure},
+		{"one job failed, others green", []models.CiState{success, failure, success}, failure},
+		{"failed and unknown", []models.CiState{unknown, failure}, failure},
+
+		// Anything unfinished holds the whole thing at pending.
+		{"one job still running", []models.CiState{success, pending}, pending},
+
+		// An unrecognized conclusion is treated as unfinished rather than
+		// guessed at: it won't queue the PR and it won't nag about it.
+		{"unrecognized conclusion", []models.CiState{success, unknown}, pending},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := mergeCIStates(test.states)
+			if got != test.want {
+				t.Errorf("merge %v: got %v, want %v", test.states, got, test.want)
+			}
+		})
+	}
+}
+
+// Check run conclusions map the way GitHub maps them for required checks:
+// skipped and neutral pass, everything that means "this went wrong" fails.
+func TestCheckRunState(t *testing.T) {
+	for _, test := range []struct {
+		status     string
+		conclusion string
+		want       models.CiState
+	}{
+		{"queued", "", models.CiStates.Pending},
+		{"in_progress", "", models.CiStates.Pending},
+		{"completed", "success", models.CiStates.Success},
+		{"completed", "skipped", models.CiStates.Success},
+		{"completed", "neutral", models.CiStates.Success},
+		{"completed", "failure", models.CiStates.Failure},
+		{"completed", "timed_out", models.CiStates.Failure},
+		{"completed", "cancelled", models.CiStates.Failure},
+		{"completed", "action_required", models.CiStates.Failure},
+		{"completed", "something_new", models.CiStates.Unknown},
+	} {
+		t.Run(test.status+"/"+test.conclusion, func(t *testing.T) {
+			run := &gh.CheckRun{Status: gh.Ptr(test.status)}
+			if test.conclusion != "" {
+				run.Conclusion = gh.Ptr(test.conclusion)
+			}
+			got := checkRunState(run)
+			if got != test.want {
+				t.Errorf("%s/%s: got %v, want %v", test.status, test.conclusion, got, test.want)
+			}
+		})
 	}
 }
 

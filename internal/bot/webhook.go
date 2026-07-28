@@ -72,6 +72,10 @@ func (b *Bot) HandleEvent(ctx context.Context, event any) error {
 		return b.handlePullRequest(ctx, e)
 	case *gh.StatusEvent:
 		return b.handleStatus(ctx, e)
+	case *gh.CheckRunEvent:
+		return b.handleCheckRun(ctx, e)
+	case *gh.CheckSuiteEvent:
+		return b.handleCheckSuite(ctx, e)
 	case *gh.InstallationEvent:
 		return b.handleInstallation(ctx, e)
 	case *gh.InstallationRepositoriesEvent:
@@ -205,16 +209,55 @@ func (b *Bot) greet(ctx context.Context, repo *models.Repo, pr *models.PullReque
 	return nil
 }
 
-// handleStatus reacts to old-style commit statuses. The event carries one
-// context's result, but queue membership depends on the combined state, so we
-// re-read that rather than trusting the single status in the payload.
+// handleStatus reacts to old-style commit statuses, the way embassy's CI
+// reports.
 func (b *Bot) handleStatus(ctx context.Context, e *gh.StatusEvent) error {
 	repo, err := b.upsertRepo(ctx, e.GetRepo(), e.GetInstallation().GetID())
 	if err != nil {
 		return err
 	}
+	return b.updateCI(ctx, repo, e.GetSHA())
+}
 
-	sha := e.GetSHA()
+// handleCheckRun reacts to check runs, the way GitHub Actions reports.
+//
+// This is chattier than statuses -- one event per job, twice (created and
+// completed) -- and each one costs a re-read. Fine at this event rate, and
+// worth it for noticing a failure as it happens rather than when the whole
+// suite finishes.
+func (b *Bot) handleCheckRun(ctx context.Context, e *gh.CheckRunEvent) error {
+	repo, err := b.upsertRepo(ctx, e.GetRepo(), e.GetInstallation().GetID())
+	if err != nil {
+		return err
+	}
+	return b.updateCI(ctx, repo, e.GetCheckRun().GetHeadSHA())
+}
+
+// handleCheckSuite reacts to a whole suite of check runs finishing.
+//
+// The app isn't subscribed to check_suite as things stand, so this never fires;
+// it's here so that trading check_run's per-job chatter for one event per suite
+// is a change in the app's settings and nothing else. Subscribing to both is
+// harmless too -- updateCI re-reads the state either way, so the second look
+// costs an API call and finds the same answer.
+func (b *Bot) handleCheckSuite(ctx context.Context, e *gh.CheckSuiteEvent) error {
+	repo, err := b.upsertRepo(ctx, e.GetRepo(), e.GetInstallation().GetID())
+	if err != nil {
+		return err
+	}
+	return b.updateCI(ctx, repo, e.GetCheckSuite().GetHeadSHA())
+}
+
+// updateCI re-reads a sha's CI state and reconciles every PR sitting on it.
+//
+// The events that get us here each carry one context's or one job's result, but
+// queue membership depends on all of them together, so the state is re-read
+// rather than taken from the payload.
+func (b *Bot) updateCI(ctx context.Context, repo *models.Repo, sha string) error {
+	if sha == "" {
+		return nil
+	}
+
 	prs, err := models.PullRequests(
 		qm.Where("repo_id = ? and head_sha = ?", repo.ID, sha),
 	).All(ctx)
