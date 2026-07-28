@@ -110,8 +110,9 @@ func main() {
 			Field("draft_notified_at", "time", Null),
 			Field("ci_notified_at", "time", Null),
 
-			// When to check whether this PR is ready-for-review but still red.
-			// Null once the check has run. See internal/bot/reconcile.go.
+			// When to check whether this PR is still red. Set when CI goes red,
+			// null while it isn't and once the check has run. See armCICheck in
+			// internal/bot/bot.go.
 			Field("ci_check_due_at", "time", Null, Index),
 		),
 	)

@@ -9,6 +9,7 @@ import (
 	"embassy.dev/bot/internal/models"
 	"embassy.dev/bot/toolkit/db"
 	"github.com/sqlbunny/sqlbunny/runtime/qm"
+	"github.com/sqlbunny/sqlbunny/types/null"
 )
 
 // testCtx connects to the local dev database. Skips rather than fails when
@@ -112,6 +113,79 @@ func TestKeepsQueuePositionAfterDropout(t *testing.T) {
 	drift := pr.FirstReviewableAt.Time.Sub(position.Time).Abs()
 	if drift > time.Millisecond {
 		t.Fatalf("lost queue position in db: was %v, now %v", position.Time, pr.FirstReviewableAt.Time)
+	}
+}
+
+// The grace period runs from CI going red, not from the PR being opened, so a
+// build that's still running never starts the clock and a slow one that fails
+// gets its full grace period from the failure.
+func TestCICheckClock(t *testing.T) {
+	b := &Bot{config: &Config{CIGracePeriod: time.Hour}}
+
+	pr := &models.PullRequest{State: models.PRStates.Open}
+
+	// Still running: nothing to nag about, no clock.
+	pr.CiState = models.CiStates.Pending
+	b.armCICheck(pr)
+	if pr.CiCheckDueAt.Valid {
+		t.Error("pending CI should not arm the check")
+	}
+
+	// Red at last: the clock starts here, an hour from now.
+	pr.CiState = models.CiStates.Failure
+	b.armCICheck(pr)
+	if !pr.CiCheckDueAt.Valid {
+		t.Fatal("failed CI should arm the check")
+	}
+	due := pr.CiCheckDueAt
+	if d := time.Until(due.Time); d < 59*time.Minute || d > time.Hour {
+		t.Errorf("want the check due in about an hour, got %v", d)
+	}
+
+	// Another failing status on the same commit mustn't push the deadline back.
+	b.armCICheck(pr)
+	if !pr.CiCheckDueAt.Time.Equal(due.Time) {
+		t.Errorf("deadline moved: was %v, now %v", due.Time, pr.CiCheckDueAt.Time)
+	}
+
+	// Fixed: the clock is dropped rather than left to fire.
+	pr.CiState = models.CiStates.Success
+	b.armCICheck(pr)
+	if pr.CiCheckDueAt.Valid {
+		t.Error("green CI should disarm the check")
+	}
+
+	// Red again: a fresh grace period, not the leftovers of the old one.
+	pr.CiState = models.CiStates.Failure
+	b.armCICheck(pr)
+	if !pr.CiCheckDueAt.Valid {
+		t.Fatal("going red again should re-arm the check")
+	}
+	if !pr.CiCheckDueAt.Time.After(due.Time) {
+		t.Errorf("want a fresh deadline after %v, got %v", due.Time, pr.CiCheckDueAt.Time)
+	}
+
+	// Drafts and closed PRs aren't nagged, and neither is one already told.
+	for _, test := range []struct {
+		name string
+		set  func(pr *models.PullRequest)
+	}{
+		{"draft", func(pr *models.PullRequest) { pr.IsDraft = true }},
+		{"closed", func(pr *models.PullRequest) { pr.State = models.PRStates.Closed }},
+		{"already notified", func(pr *models.PullRequest) { pr.CiNotifiedAt = null.TimeFrom(time.Now()) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pr := &models.PullRequest{
+				State:        models.PRStates.Open,
+				CiState:      models.CiStates.Failure,
+				CiCheckDueAt: null.TimeFrom(time.Now().Add(time.Hour)),
+			}
+			test.set(pr)
+			b.armCICheck(pr)
+			if pr.CiCheckDueAt.Valid {
+				t.Errorf("%s should disarm the check", test.name)
+			}
+		})
 	}
 }
 

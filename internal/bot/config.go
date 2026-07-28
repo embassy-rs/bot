@@ -12,7 +12,8 @@ type Config struct {
 
 	ContributorGuideURL string `envconfig:"CONTRIBUTOR_GUIDE_URL" default:"https://github.com/embassy-rs/embassy/blob/main/CONTRIBUTING.md"`
 
-	// How long a PR gets to go green before we point out that it isn't.
+	// How long a PR gets to stop being red, counted from CI going red, before we
+	// point out that it is.
 	CIGracePeriod time.Duration `envconfig:"CI_GRACE_PERIOD" default:"1h"`
 
 	// How often to look for PRs whose grace period has elapsed.

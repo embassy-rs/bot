@@ -55,14 +55,14 @@ func (b *Bot) tick(ctx context.Context) error {
 	return nil
 }
 
-// runCICheck is the grace-period check armed when a PR is opened: if it's out of
-// draft and still isn't green, say so, once.
+// runCICheck is the grace-period check armed when CI goes red: if the PR is
+// still red a grace period later, say so, once.
 func (b *Bot) runCICheck(ctx context.Context, pr *models.PullRequest) error {
 	repo := pr.R.Repo()
 	ctx = log.With(ctx, log.Fields{"pr": pr.HTMLURL})
 
 	// Fires once, whatever the outcome, so a PR can't get stuck re-checking
-	// every tick forever.
+	// every tick forever. Going red again arms a fresh check.
 	pr.CiCheckDueAt = null.Time{}
 
 	// Re-read the status rather than trusting our stored copy: a `status` event
@@ -75,10 +75,9 @@ func (b *Bot) runCICheck(ctx context.Context, pr *models.PullRequest) error {
 		pr.CiState = state
 	}
 
-	nag := pr.State == models.PRStates.Open &&
-		!pr.IsDraft &&
-		pr.CiState != models.CiStates.Success &&
-		!pr.CiNotifiedAt.Valid
+	// Red when the clock was armed isn't enough: a rerun may have put CI back to
+	// pending, or a fix may have landed. It has to still be red now.
+	nag := ciRed(pr) && !pr.CiNotifiedAt.Valid
 
 	if nag {
 		err := b.comment(ctx, repo, pr, b.ciText())
@@ -98,8 +97,8 @@ func (b *Bot) runCICheck(ctx context.Context, pr *models.PullRequest) error {
 // installed on a repo, and by the `sync` command to recover from missed events.
 //
 // Backfilled PRs deliberately get no ci_check_due_at: the grace period is meant
-// to catch up with a PR that was just opened, not to nag every red PR in the
-// backlog the moment the app is installed.
+// to catch a PR we watched go red, not to nag every red PR in the backlog the
+// moment the app is installed. The next status event on one arms it normally.
 func (b *Bot) SyncRepo(ctx context.Context, repo *models.Repo) error {
 	client, err := b.client(repo)
 	if err != nil {

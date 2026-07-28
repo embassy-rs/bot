@@ -29,7 +29,7 @@ func (b *Bot) draftText() string {
 
 func (b *Bot) ciText() string {
 	return fmt.Sprintf(
-		"CI on this pull request isn't green, so it isn't in the [review queue](%s) yet. "+
+		"CI on this pull request is failing, so it isn't in the [review queue](%s) yet. "+
 			"A pull request needs passing CI to be queued for review — push a fix and it'll be "+
 			"added automatically.",
 		b.config.PublicURL,

@@ -111,6 +111,35 @@ func reviewable(pr *models.PullRequest) bool {
 		pr.CiState == models.CiStates.Success
 }
 
+// ciRed is what the CI notice is about: an open, ready-for-review PR whose CI
+// has actually failed. Pending deliberately doesn't count -- a build that's
+// still running isn't green either, but nothing has gone wrong yet.
+func ciRed(pr *models.PullRequest) bool {
+	return pr.State == models.PRStates.Open &&
+		!pr.IsDraft &&
+		pr.CiState == models.CiStates.Failure
+}
+
+// armCICheck starts or stops the "is it still red?" clock. The grace period
+// runs from CI going red, not from the PR being opened: a two-hour build that
+// fails at the end gets its hour from the failure, and one that's merely still
+// running never gets nagged at all.
+//
+// The clock is dropped rather than paused as soon as the PR stops qualifying,
+// so a red -> green -> red round trip, or a draft marked ready for review, gets
+// a fresh hour.
+func (b *Bot) armCICheck(pr *models.PullRequest) {
+	if !ciRed(pr) || pr.CiNotifiedAt.Valid {
+		pr.CiCheckDueAt = null.Time{}
+		return
+	}
+	// Already counting down: leave the deadline alone, so a second failing
+	// status on the same commit doesn't keep pushing it back.
+	if !pr.CiCheckDueAt.Valid {
+		pr.CiCheckDueAt = null.TimeFrom(time.Now().Add(b.config.CIGracePeriod))
+	}
+}
+
 // reconcile recomputes a PR's queue membership and saves it. FirstReviewableAt
 // is stamped the first time the PR qualifies and never cleared, so a PR that
 // goes red and green again keeps the place in line it originally earned.

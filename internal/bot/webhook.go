@@ -121,9 +121,6 @@ func (b *Bot) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent) err
 	pr.UpdatedAt = time.Now()
 
 	if isNew {
-		// The clock for "is this thing still red an hour later?" starts when the
-		// PR is opened, draft or not.
-		pr.CiCheckDueAt = null.TimeFrom(pr.CreatedAt.Add(b.config.CIGracePeriod))
 		err := pr.Insert(ctx)
 		if err != nil {
 			return err
@@ -143,21 +140,18 @@ func (b *Bot) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent) err
 		pr.CiState = state
 	}
 
-	switch e.GetAction() {
-	case "opened":
+	if e.GetAction() == "opened" {
 		// A failure here shouldn't cost us the queue update below, and there's
 		// nothing to retry against: greet only runs on `opened`.
 		if err := b.greet(ctx, repo, pr, ghpr); err != nil {
 			log.Errorf(ctx, "greeting failed", log.Fields{"err": errors.StackTrace(err)})
 		}
-
-	case "ready_for_review":
-		// Opened as a draft and marked ready after the grace period had already
-		// elapsed: give it a fresh hour rather than nagging on the spot.
-		if !pr.CiNotifiedAt.Valid && !pr.CiCheckDueAt.Valid {
-			pr.CiCheckDueAt = null.TimeFrom(time.Now().Add(b.config.CIGracePeriod))
-		}
 	}
+
+	// Draft, closed and reopened all change whether the notice applies, so the
+	// clock is recomputed here rather than per action. A draft marked ready for
+	// review while red gets its grace period from that moment.
+	b.armCICheck(pr)
 
 	return b.reconcile(ctx, pr)
 }
@@ -238,6 +232,7 @@ func (b *Bot) handleStatus(ctx context.Context, e *gh.StatusEvent) error {
 
 	for _, pr := range prs {
 		pr.CiState = state
+		b.armCICheck(pr)
 		if err := b.reconcile(ctx, pr); err != nil {
 			return err
 		}
