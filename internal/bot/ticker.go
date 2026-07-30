@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"embassy.dev/bot/internal/models"
+	"embassy.dev/bot/toolkit/asynccontext"
 	"embassy.dev/bot/toolkit/log"
+	"embassy.dev/bot/toolkit/nopanic"
 	gh "github.com/google/go-github/v88/github"
 	"github.com/sqlbunny/errors"
 	"github.com/sqlbunny/sqlbunny/runtime/bunny"
@@ -131,6 +133,43 @@ func (b *Bot) SyncRepo(ctx context.Context, repo *models.Repo) error {
 
 	log.Infof(ctx, "synced repo", log.Fields{"repo": repo.Owner + "/" + repo.Name})
 	return nil
+}
+
+// syncReposAsync backfills the repos on a goroutine of its own, so a caller
+// that's under a deadline (see addRepos) doesn't have to wait for it.
+//
+// The context is cloned rather than passed on: the request's is canceled the
+// moment the handler returns, which would kill the sync a few PRs in. Cloning
+// keeps the logger and the database handle, and drops the cancelation.
+//
+// It takes the event lock like a handler would, so a sync running in the
+// background and a webhook landing mid-sync still don't touch a PR at the same
+// time. Which means it only starts once the handler that spawned it returns.
+func (b *Bot) syncReposAsync(ctx context.Context, repos models.RepoSlice) {
+	ctx = asynccontext.Clone(ctx)
+
+	go func() {
+		err := nopanic.Run(func() error {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+
+			for _, repo := range repos {
+				// One repo failing shouldn't cost the others their backfill:
+				// there's no delivery left to fail and no retry behind this.
+				err := b.SyncRepo(ctx, repo)
+				if err != nil {
+					log.Errorf(ctx, "background sync failed", log.Fields{
+						"repo": repo.Owner + "/" + repo.Name,
+						"err":  errors.StackTrace(err),
+					})
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Error(ctx, errors.StackTrace(err))
+		}
+	}()
 }
 
 func (b *Bot) syncPR(ctx context.Context, repo *models.Repo, ghpr *gh.PullRequest) error {

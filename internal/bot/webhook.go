@@ -286,11 +286,7 @@ func (b *Bot) updateCI(ctx context.Context, repo *models.Repo, sha string) error
 func (b *Bot) handleInstallation(ctx context.Context, e *gh.InstallationEvent) error {
 	switch e.GetAction() {
 	case "created", "unsuspend", "new_permissions_accepted":
-		for _, r := range e.Repositories {
-			if err := b.addRepo(ctx, r, e.GetInstallation().GetID()); err != nil {
-				return err
-			}
-		}
+		return b.addRepos(ctx, e.Repositories, e.GetInstallation().GetID())
 	case "deleted", "suspend":
 		for _, r := range e.Repositories {
 			if err := b.forgetRepo(ctx, r.GetID()); err != nil {
@@ -302,10 +298,9 @@ func (b *Bot) handleInstallation(ctx context.Context, e *gh.InstallationEvent) e
 }
 
 func (b *Bot) handleInstallationRepositories(ctx context.Context, e *gh.InstallationRepositoriesEvent) error {
-	for _, r := range e.RepositoriesAdded {
-		if err := b.addRepo(ctx, r, e.GetInstallation().GetID()); err != nil {
-			return err
-		}
+	err := b.addRepos(ctx, e.RepositoriesAdded, e.GetInstallation().GetID())
+	if err != nil {
+		return err
 	}
 	for _, r := range e.RepositoriesRemoved {
 		if err := b.forgetRepo(ctx, r.GetID()); err != nil {
@@ -315,12 +310,24 @@ func (b *Bot) handleInstallationRepositories(ctx context.Context, e *gh.Installa
 	return nil
 }
 
-func (b *Bot) addRepo(ctx context.Context, r *gh.Repository, installationID int64) error {
-	repo, err := b.upsertRepo(ctx, r, installationID)
-	if err != nil {
-		return err
+// addRepos records the repos, then backfills them in the background.
+//
+// Only the recording happens inline: the backfill is a couple of GitHub API
+// calls per open PR, which on a repo of any size takes far longer than the ten
+// seconds GitHub gives a webhook delivery before it hangs up and cancels the
+// request, leaving the sync half done. Nothing else in the event needs to wait
+// for it, so the delivery returns as soon as the rows exist.
+func (b *Bot) addRepos(ctx context.Context, ghrepos []*gh.Repository, installationID int64) error {
+	var repos models.RepoSlice
+	for _, r := range ghrepos {
+		repo, err := b.upsertRepo(ctx, r, installationID)
+		if err != nil {
+			return err
+		}
+		repos = append(repos, repo)
 	}
-	return b.SyncRepo(ctx, repo)
+	b.syncReposAsync(ctx, repos)
+	return nil
 }
 
 func (b *Bot) forgetRepo(ctx context.Context, repoID int64) error {
